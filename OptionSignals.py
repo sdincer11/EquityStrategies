@@ -144,3 +144,367 @@ def ATM_Call_Put_Spread(dailyStockFile, optionMetricsCRSPLinkFile, optionPriceFo
                 allDF = pd.read_sql_query(query, conn)
                 allDF.to_csv(outputFile, index=False, mode='a', header=False)
 
+
+def OTM_Put_ATM_Call_Spread(dailyStockFile, optionMetricsCRSPLinkFile, optionPriceFolder):
+    '''
+    i) The underlying stock’s volume for that day is positive.
+    ii) The underlying stock’s price for that day is higher than $5.
+    iii) The implied volatility of the option is between 3% and 200%.
+    iv) The option’s price (average of best bid price and best ask price) is higher than
+    $0.125.
+    v) The option contract has positive open interest and nonmissing volume data.
+    vi) The option matures within 10–60 days.
+    vii) A put option is defined as OTM when the ratio of the strike price to the stock price
+    is lower than 0.95 (but higher than 0.80), and a call option is defined as ATM
+    when the ratio of the strike price to the stock price is between 0.95 and 1.05
+    vii) If there are multiple ATM call or OTM puts for each stock on a day, then two approaches:
+            * select ATM calls with moneyness being closest to 1; select OTM puts with moneyness being closest to 0.95
+            ** calculate volume-weighted implied volatities,
+            *** or select the option contract with the highest trading volume or open interest
+            **** or select the option contract which is the closest to being ATM call or being OTM put
+            '''
+
+    def writeHeader():
+        with open(optionPriceFolder + 'options_date.csv', 'w') as f:
+            f.write('''SECID,OPTIONID,PERMNO,DATE''' + '\n')
+        with open(optionPriceFolder + 'otm-atm volatility spread (highest).csv', 'w') as f:
+            f.write('''PERMNO,DATE,HVVOL_OTM,HVVOL_ATM,HVVS,HOVOL_OTM,HOVOL_ATM,HOVS''' + '\n')
+        with open(optionPriceFolder + 'otm-atm volatility spread (weighted).csv', 'w') as f:
+            f.write('''PERMNO,DATE,VWVS_ATM,VWVS_OTM,VWVS,OWVS_ATM,OWVS_OTM,OWVS''' + '\n')
+        with open(optionPriceFolder + 'otm-atm volatility spread (closest).csv', 'w') as f:
+            f.write('''PERMNO,DATE,MONEYNESS_VOL_ATM,MONEYNESS_VOL_OTM,MONEYNESS_VS''' + '\n')
+        with open(optionPriceFolder + 'otm-atm volatility spread (all together).csv', 'w') as f:
+            f.write('''PERMNO,DATE,VWVS_ATM,VWVS_OTM,VWVS,OWVS_ATM,OWVS_OTM,OWVS,HVVOL_OTM,HVVOL_ATM,HVVS,HOVOL_OTM,HOVOL_ATM,HOVS,MONEYNESS_VOL_ATM,MONEYNESS_VOL_OTM,MONEYNESS_VS''' + '\n')
+    def closest(conn, fname=optionPriceFolder + 'otm-atm volatility spread (closest).csv'):
+        atm_query = '''
+            select distinct permno,date,impl_volatility
+            from
+                (
+                select distinct permno,date,open_interest,impl_volatility
+                from
+                    (
+                    select distinct permno,date,open_interest,volume,impl_volatility
+                    from
+                        to_summarize
+                    where
+                        cp_flag='C'
+                    group by permno,date
+                    having min(abs(impl_volatility-1))=abs(impl_volatility-1)
+                    )
+                    group by permno,date
+                    having max(volume)=volume
+                )
+                group by permno,date
+                having max(open_interest)=open_interest
+                    '''
+        pd.read_sql_query(atm_query, conn).to_sql('atm', conn, if_exists='replace')
+        otm_query = '''
+                select distinct permno,date,impl_volatility
+                from
+                    (
+                    select distinct permno,date,open_interest,impl_volatility
+                    from
+                        (
+                        select distinct permno,date,open_interest,volume,impl_volatility
+                        from
+                            to_summarize
+                        where
+                            cp_flag='P'
+                        group by permno,date
+                        having min(abs(impl_volatility-0.95))=abs(impl_volatility-0.95)
+                        )
+                        group by permno,date
+                        having max(volume)=volume
+                    )
+                    group by permno,date
+                    having max(open_interest)=open_interest
+                        '''
+        pd.read_sql_query(otm_query, conn).to_sql('otm', conn, if_exists='replace')
+        final_query = '''select distinct 
+                            a.permno,a.date, 
+                            b.impl_volatility as atm_ivol,
+                            c.impl_volatility as otm_ivol,
+                            c.impl_volatility-b.impl_volatility as closest_vol_spread
+                            from
+                            to_summarize as a
+                            left join atm as b
+                            on
+                            a.permno=b.permno
+                            and a.date=b.date
+                            left join otm as c
+                            on
+                            a.permno=c.permno
+                            and a.date=c.date'''
+        chunks = pd.read_sql_query(final_query, conn, chunksize=10000000)
+        for chunk in chunks:
+            chunk.to_csv(fname, index=False, mode='a', header=False)
+
+    def highest_ivol(conn, fname=optionPriceFolder + 'otm-atm volatility spread (highest).csv'):
+        highest_vol_atm = '''
+                    select distinct permno,date,impl_volatility
+                        from  
+                            (   
+                            select distinct permno,date,open_interest,impl_volatility
+                            from
+                                to_summarize
+                            where
+                                cp_flag='C'
+                                group by permno,date
+                                having max(volume)=volume
+                            )
+                            group by permno,date
+                            having max(open_interest)=open_interest'''
+        pd.read_sql_query(highest_vol_atm, conn).to_sql('highest_vol_atm', conn, if_exists='replace')
+        highest_vol_otm = '''    
+                        select distinct permno,date,impl_volatility
+                        from
+                            ( 
+                            select distinct permno,date,open_interest,impl_volatility
+                            from
+                                to_summarize
+                            where
+                                cp_flag='P'
+                                group by permno,date
+                                having max(volume)=volume
+                            )
+                            group by permno,date
+                            having max(open_interest)=open_interest'''
+        pd.read_sql_query(highest_vol_otm, conn).to_sql('highest_vol_otm', conn, if_exists='replace')
+        highest_openint_otm = '''  
+                        select distinct permno,date,impl_volatility
+                        from
+                            (
+                            select distinct permno,date,volume,impl_volatility
+                            from
+                                to_summarize
+                            where
+                                cp_flag='P'
+                                group by permno,date
+                                having max(open_interest)=open_interest
+                            )    
+                            group by permno,date
+                            having max(volume)=volume'''
+        pd.read_sql_query(highest_openint_otm, conn).to_sql('highest_openint_OTM', conn, if_exists='replace')
+        highest_openint_atm = '''
+                        select distinct permno,date,impl_volatility
+                            from
+                            (
+                            select distinct permno,date,volume,impl_volatility
+                            from
+                                to_summarize
+                            where
+                                cp_flag='C'
+                                group by permno,date
+                                having max(open_interest)=open_interest
+                            )    
+                            group by permno,date
+                            having max(volume)=volume'''
+        pd.read_sql_query(highest_openint_atm, conn).to_sql('highest_openint_ATM', conn, if_exists='replace')
+        query = '''select distinct a.permno, a.date,
+                            highest_vol_OTM.impl_volatility as otm_highest_vol_ivol,
+                            highest_vol_ATM.impl_volatility as atm_highest_vol_ivol,
+                            highest_vol_OTM.impl_volatility- highest_vol_ATM.impl_volatility as hvvs,
+                            highest_openint_OTM.impl_volatility as otm_highest_oi_ivol,
+                            highest_openint_ATM.impl_volatility as atm_highest_oi_ivol,
+                            highest_openint_OTM.impl_volatility- highest_openint_ATM.impl_volatility as hovs
+                            from
+                            (select distinct permno,date,optionid from to_summarize) as a
+
+                            left join highest_vol_ATM
+                            on
+                            a.permno=highest_vol_ATM.permno
+                            and a.date=highest_vol_ATM.date
+
+                            left join highest_vol_OTM
+                            on
+                            a.permno=highest_vol_OTM.permno
+                            and a.date=highest_vol_OTM.date
+
+                            left join highest_openint_ATM
+                            on
+                            a.permno=highest_openint_ATM.permno
+                            and a.date=highest_openint_ATM.date
+
+                            left join highest_openint_OTM
+                            on
+                            a.permno=highest_openint_OTM.permno
+                            and a.date=highest_openint_OTM.date
+                        '''
+        chunks = pd.read_sql_query(query, conn, chunksize=10000000)
+        for chunk in chunks:
+            chunk.to_csv(fname, index=False, mode='a', header=False)
+
+    def weighted_ivol(conn, fname=optionPriceFolder + 'otm-atm volatility spread (weighted).csv'):
+        query = '''
+                        select distinct permno,date,
+                            sum(open_interest_wt_ivol/total_open_interest) as owvs_otm,
+                            sum(vol_wt_ivol/total_open_interest) as vwvs_otm
+                            from
+                            (
+                            select distinct a.permno,a.date,a.optionid,a.impl_volatility,a.open_interest,a.volume,
+                                a.open_interest_wt_ivol,
+                                a.vol_wt_ivol,
+                                b.total_vol,b.total_open_interest
+                                from
+                                (select distinct a.permno,a.date,a.optionid,a.open_interest,a.volume,a.impl_volatility,
+                                 a.open_interest*a.impl_volatility as open_interest_wt_ivol,
+                                a.volume*a.impl_volatility as  vol_wt_ivol from to_summarize as a)
+                                as a
+                                left join (
+                                select distinct permno,optionid,date,sum(volume) as total_vol,sum(open_interest) as total_open_interest
+                                        from to_summarize
+                                        where
+                                        cp_flag='P'
+                                        group by permno,date
+                                ) as b
+                                on
+                                a.permno=b.permno
+                                and a.date=b.date
+                            )
+                            group by permno,date
+                                '''
+        pd.read_sql_query(query, conn).to_sql('otm', conn, if_exists='replace')
+        query = '''select distinct permno,date,
+                            sum(open_interest_wt_ivol/total_open_interest) as owvs_atm,
+                            sum(vol_wt_ivol/total_open_interest) as vwvs_atm
+                            from
+                            (
+                            select distinct a.permno,a.date,a.optionid,a.impl_volatility,a.open_interest,a.volume,
+                                a.open_interest_wt_ivol,
+                                a.vol_wt_ivol,
+                                b.total_vol,b.total_open_interest
+                                from
+                                (select distinct a.permno,a.date,a.optionid,a.open_interest,a.volume,a.impl_volatility,
+                                 a.open_interest*a.impl_volatility as open_interest_wt_ivol,
+                                a.volume*a.impl_volatility as  vol_wt_ivol from to_summarize as a)
+                                as a
+                                left join (
+                                select distinct permno,optionid,date,sum(volume) as total_vol,sum(open_interest) as total_open_interest
+                                        from to_summarize
+                                        where
+                                        cp_flag='C'
+                                        group by permno,date
+                                ) as b
+                                on
+                                a.permno=b.permno
+                                and a.date=b.date
+                            )
+                            group by permno,date
+                                '''
+        pd.read_sql_query(query, conn).to_sql('atm', conn, if_exists='replace')
+        vwvs_query = '''
+                            select distinct a.permno,a.date, 
+                            ATM.vwvs_atm, OTM.vwvs_otm,  OTM.vwvs_otm- ATM.vwvs_atm  as vwvs,
+                            ATM.owvs_atm, OTM.owvs_otm,  OTM.owvs_otm- ATM.owvs_atm  as owvs
+                            from
+                            (select distinct permno,date from to_summarize) as a
+                            left join
+                            otm as OTM
+                            on
+                            a.permno=OTM.permno
+                            and a.date=OTM.date
+                            left join
+                            atm as ATM
+                            on
+                            a.permno=ATM.permno
+                            and a.date=ATM.date
+                                    '''
+        pd.read_sql_query(vwvs_query, conn).to_csv(fname, index=False, mode='a', header=False)
+
+    def combine_measures(infname1=optionPriceFolder + 'options_date.csv',
+                         infname2=optionPriceFolder + 'otm-atm volatility spread (weighted).csv',
+                         infname3=optionPriceFolder + 'otm-atm volatility spread (highest).csv',
+                         infname4=optionPriceFolder + 'otm-atm volatility spread (closest).csv',
+                         outfname=optionPriceFolder + 'otm-atm volatility spread (all together).csv'):
+        conn = sqlConnect()
+        data = pd.read_csv(infname1).drop_duplicates()
+        data.to_sql('options_date', conn)
+        pd.read_csv(infname2).to_sql('weighted', conn)
+        pd.read_csv(infname3).to_sql('highest', conn)
+        pd.read_csv(infname4).to_sql('closest', conn)
+        query = '''select distinct 
+                            a.permno,a.date,
+                            b.VWVS_ATM,b.VWVS_OTM,b.VWVS,
+                            b.OWVS_ATM,b.OWVS_OTM,b.OWVS,
+                            c.HVVOL_OTM,c.HVVOL_ATM,c.HVVS,c.HOVOL_OTM,c.HOVOL_ATM,c.HOVS,
+                            d.MONEYNESS_VOL_ATM,d.MONEYNESS_VOL_OTM,d.MONEYNESS_VS
+                            from 
+                            (select distinct permno, date from options_date) as a
+                            left join weighted as b
+                            on
+                            a.permno=b.permno
+                            and a.date=b.date
+                            left join highest as c
+                            on
+                            a.permno=c.permno
+                            and a.date=c.date
+                            left join closest as d
+                            on
+                            a.permno=d.permno
+                            and a.date=d.date'''
+        chunks = pd.read_sql_query(query, conn, chunksize=10000000)
+        for chunk in chunks:
+            chunk.to_csv(outfname, index=False, mode='a', header=False)
+        k = 2
+    writeHeader()
+    dsf = pd.read_csv(dailyStockFile)
+    dsf['year'] = floor(dsf['DATE'].values / 10000).astype(int)
+    priceFiles = os.listdir(optionPriceFolder)
+    conn = sqlConnect()
+    pd.read_csv(optionMetricsCRSPLinkFile).to_sql('oclink', conn)
+    for file in priceFiles:
+        year_text = file.replace('.csv', '').split('-')
+        start_year = int(year_text[0])
+        finish_year = int(year_text[1]) + 1
+        years = range(start_year, finish_year)
+        for year in years:
+            allDF = pd.DataFrame()
+            dsf2 = dsf[dsf['year'] == year]
+            dsf2.to_sql('dsf', conn, if_exists='replace')
+            chunks = pd.read_csv(optionPriceFolder + file,
+                                 usecols=['secid', 'optionid', 'date', 'exdate', 'cp_flag', 'best_bid', 'best_offer',
+                                          'volume',
+                                          'strike_price', 'open_interest', 'impl_volatility'], chunksize=15000000)
+
+            for chunk_id, chunk in enumerate(chunks):
+                chunk['year'] = floor(chunk['date'].values / 10000).astype(int)
+                chunk = chunk[chunk['year'] == year]
+                chunk['yyyymm'] = floor(chunk['date'].values / 100).astype(int)
+                if not chunk.empty:
+                    chunk['days_to_maturity'] = (pd.to_datetime(chunk['exdate'], errors='coerce', format='%Y%m%d') - pd.to_datetime(chunk['date'], errors='coerce', format='%Y%m%d')).dt.days
+                    chunk = chunk[(chunk['days_to_maturity'] >= 10) & (chunk['days_to_maturity'] <= 60)]
+                    chunk = chunk[(chunk['volume'].notnull()) & (chunk['open_interest'] > 0) & (chunk['impl_volatility'].notnull())]
+                    chunk['price'] = (chunk['best_bid'] + chunk['best_offer']) / 2
+                    chunk = chunk[chunk['price'] >= 0.125]
+                    chunk = chunk[(chunk['impl_volatility'] >= 0.03) & chunk['impl_volatility'] <= 200]
+                    chunk.to_sql('chunk', conn, if_exists='replace')
+                    query = '''
+                            select distinct permno,secid,optionid,cp_flag,yyyymm,date,moneyness,impl_volatility,volume,open_interest
+                                from
+                                (
+                                select distinct a.*,b.secid,b.permno,abs(c.prc) as prc ,(a.strike_price/1000)/abs(c.prc) as moneyness
+                                    from chunk as a, oclink as b, dsf as c
+                                where
+                                    a.secid=b.secid
+                                    and b.score in (0,1,2,3)
+                                    and b.permno=c.permno
+                                    and a.date=c.date
+                                    and a.year=''' + str(year) + ''')'''
+                    chunk = pd.read_sql_query(query, conn)
+                    chunk = chunk[
+                        ((chunk['moneyness'] >= 0.8) & (chunk['moneyness'] < 0.95) & (chunk['cp_flag'] == 'P')) |
+                        ((chunk['moneyness'] >= 0.95) & (chunk['moneyness'] <= 1.05) & (chunk['cp_flag'] == 'C'))]
+                    allDF = allDF.append(chunk)
+                else:
+                    continue
+
+            if not allDF.empty:
+                allDF.to_sql('to_summarize', conn, if_exists='replace')
+                allDF[['secid', 'optionid', 'permno', 'date']].drop_duplicates().to_csv(optionPriceFolder + 'options_date.csv', mode='a', header=False, index=False)
+                weighted_ivol(conn)
+                highest_ivol(conn)
+                closest(conn)
+    conn.close()
+    combine_measures()
+
+
