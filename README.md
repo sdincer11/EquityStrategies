@@ -20,4 +20,11 @@
 # 5) binSize=10
 # WARNING: You need to ensure that the CSV File does not have any duplicate records for each (securityIdentifier, dateIdentifier) combination.
 
+
+# NOTES FOR OptionSignals.py
+# OptionSignals.py has the codes for calculating option signals to predict future stock returns.
+# ATM Call and Put Volatility Spread: Bali and Hovakimian (2009) show the spread between implied volatilities of ATM call and put option contracts predict the future underlying stock returns positively.
+# OTM Put and ATM Call Volatility Spread: Xing (2010) shows that the OTM Puts carry information about the underlying stock. Specifically, the slope of the individual option volatility smirk (i.e, the spread between OTM puts and ATM calls of the same underlying) predicts the future stock returns negatively at the weekly level.
+# Put-Call Parity Deviations: Cremers and Weinbaum (2010) shows that the put call parity deviations of individual stock options carry some useful information about the future stock performance.
+
  
