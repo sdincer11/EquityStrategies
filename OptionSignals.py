@@ -508,3 +508,84 @@ def OTM_Put_ATM_Call_Spread(dailyStockFile, optionMetricsCRSPLinkFile, optionPri
     combine_measures()
 
 
+def Put_Call_Parity_Deviation(dailyStockFile, optionMetricsCRSPLinkFile, optionPriceFolder):
+    projectPath = os.getcwd().replace('\\','/') + '/'
+    oclink = pd.read_csv(optionMetricsCRSPLinkFile,usecols=['PERMNO','secid','SCORE'])
+    oclink=oclink[oclink['SCORE'].isin([0,1,2,3])]
+    oclink.columns=[col.upper() for col in oclink.columns]
+    oclink=oclink[['PERMNO','SECID']]
+    dsf=pd.read_csv(dailyStockFile)
+
+
+    files=os.listdir(optionPriceFolder)
+    for file in files:
+        year_text=file.replace('.csv','').split('-')
+        start_year=int(year_text[0])
+        finish_year = int(year_text[1])+1
+        years_list=list(np.arange(start_year,finish_year))
+        headerFlag=True
+        #Bring option related data from OptionMetrics
+        chunks=pd.read_csv(optionPriceFolder+file,chunksize=10000000,usecols=['secid','optionid','date','exdate','strike_price','cp_flag','best_bid','best_offer','open_interest','volume','impl_volatility'])
+        for chunk in chunks:
+            chunk.columns = [col.upper() for col in chunk.columns]
+            chunk = pd.merge(chunk,oclink,on=['SECID'])
+            #finish_chunk=pd.merge(start,chunk2,left_on=['SECID','DATE_END'],right_on=['SECID','DATE'])
+            #finish_chunk.rename(columns={'STRIKE_PRICE':'STRIKE'},inplace=True)
+            if not chunk.empty:
+                chunk = chunk[chunk['CP_FLAG'].notnull()]
+                chunk['STRIKE'] = chunk['STRIKE_PRICE']/1000
+                chunk['OPTION_PRICE'] = abs( (chunk['BEST_BID']+chunk['BEST_OFFER'])/2)
+                chunk = chunk[(chunk['OPEN_INTEREST'] > 0) & (chunk['BEST_BID'] < chunk['BEST_OFFER']) & (chunk['BEST_BID'] > 0) ]
+                chunk = chunk[chunk['OPTION_PRICE'] >= 0.125]
+                chunk = chunk[(chunk['IMPL_VOLATILITY'] >= 0.03) &(chunk['IMPL_VOLATILITY'] <= 2)]
+                chunk['DATE2'] = pd.to_datetime(chunk['DATE'],format='%Y%m%d',errors='coerce')
+                chunk['EXDATE2'] = pd.to_datetime(chunk['EXDATE'],format='%Y%m%d',errors='coerce')
+                chunk['T'] = (chunk['EXDATE2']-chunk['DATE2']).dt.days
+                chunk = chunk[(chunk['T']>=10) &(chunk['T']<=60)]
+
+                #Merge with CRSP
+                chunk = pd.merge(chunk,dsf,on=['PERMNO','DATE'])
+                chunk['MONEYNESS'] =chunk['STRIKE']/chunk['PRC']
+                chunk = chunk[(chunk['MONEYNESS']<=1.1) & (chunk['MONEYNESS']>=0.90)]
+                #Basic arbitrage conditions
+                chunk.loc[chunk['CP_FLAG'] == 'C','INTRINSIC_VALUE'] = chunk['PRC']-chunk['STRIKE']
+                chunk.loc[chunk['CP_FLAG'] == 'P','INTRINSIC_VALUE'] = chunk['STRIKE']-chunk['PRC']
+                chunk.loc[(chunk['INTRINSIC_VALUE']<0),'INTRINSIC_VALUE']=0
+                chunk = chunk[ ( ((chunk['CP_FLAG'] == 'C') & (chunk['PRC'] >= chunk['BEST_BID']) )
+                                 | ((chunk['CP_FLAG'] == 'P')  & (chunk['STRIKE'] >= chunk['BEST_BID'])) )
+                               & (chunk['BEST_OFFER'] >= chunk['INTRINSIC_VALUE'])].reset_index(drop=True)
+                chunk.drop(columns=['DATE2','EXDATE2','STRIKE_PRICE','BEST_BID','BEST_OFFER','INTRINSIC_VALUE','MONEYNESS'],inplace=True)
+                chunk['YEAR'] = (chunk['DATE']/10000).astype(int)
+                years = np.sort(list(chunk['YEAR'].unique()))
+                for year in years:
+                    outFile = projectPath + str(year)+'.csv'
+                    chunk2 = chunk[chunk['YEAR'] == year]
+                    chunk2.drop(columns=['YEAR','T','OPTION_PRICE','PRC'],inplace=True)
+                    if os.path.exists(outFile):
+                        chunk2.to_csv(outFile,index=False,mode='a',header=False)
+                    else:
+                        chunk2.to_csv(outFile,index=False,mode='a',header=True)
+        for year in years_list:
+            inFile = projectPath+str(year)+'.csv'
+            data = pd.read_csv(inFile)
+            pairs = data.groupby(['PERMNO','SECID','DATE','EXDATE','STRIKE','CP_FLAG'])['OPTIONID'].count().reset_index()
+            pairs = pairs.groupby(['PERMNO','SECID','DATE','EXDATE','STRIKE'])['OPTIONID'].sum().reset_index()
+            pairs = pairs[pairs['OPTIONID']==2]
+            data = pd.merge(data,pairs,on=['PERMNO','SECID','DATE','EXDATE','STRIKE'],suffixes=('','_y'))
+            data['PAIR_ID'] = data.groupby(['PERMNO','SECID','DATE','EXDATE','STRIKE']).ngroup()
+            calls = data[data['CP_FLAG']=='C']
+            puts = data[data['CP_FLAG']=='P']
+            calls = pd.merge(calls,puts,how='left',on=['PERMNO','SECID','DATE','EXDATE','STRIKE','PAIR_ID'],suffixes=('_call','_put'))
+            calls['OPEN_INTEREST_avg'] = (calls['OPEN_INTEREST_call']+calls['OPEN_INTEREST_put'])/2
+            total_openint = calls.groupby(['PERMNO','DATE'])['OPEN_INTEREST_avg'].sum().reset_index()
+            calls = pd.merge(calls,total_openint,how='left',on=['PERMNO','DATE'],suffixes=('','_total'))
+            calls['OIW_PARITY_SPREAD'] = (calls['IMPL_VOLATILITY_put']-calls['IMPL_VOLATILITY_call'])*calls['OPEN_INTEREST_avg']/calls['OPEN_INTEREST_avg_total']
+            calls['EW_PARITY_SPREAD'] = (calls['IMPL_VOLATILITY_put']-calls['IMPL_VOLATILITY_call'])
+
+            firm_date = calls[['PERMNO','DATE']].drop_duplicates()
+            open_int_weighted = calls.groupby(['PERMNO','DATE'])['OIW_PARITY_SPREAD'].sum().reset_index()
+            equal_weighted = calls.groupby(['PERMNO','DATE'])['EW_PARITY_SPREAD'].mean().reset_index()
+
+            firm_date = pd.merge(firm_date, open_int_weighted, how='left', on = ['PERMNO','DATE'])
+            firm_date = pd.merge(firm_date, equal_weighted, how='left', on = ['PERMNO','DATE'])
+            firm_date.to_csv( projectPath + str(year)+'_put_call_parity_spread.csv',index=False)
