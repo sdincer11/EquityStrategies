@@ -1,5 +1,8 @@
 import pandas as pd
 import numpy as np
+import os
+os.system('python -m venv venv && venv\\Scripts\\activate.bat && pip install pipreqs && pipreqs "' + os.getcwd() +'" && pip install -r requirements.txt')
+
 
 # This measure of tail risk is proposed by Kelly and Jiang (2014). Tail risk loading is not exactly like market beta
 # since the independent variable in the regression, market risk measure (lambda), is not a "return" variable. So, it might be
